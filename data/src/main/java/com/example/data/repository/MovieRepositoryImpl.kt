@@ -8,11 +8,10 @@ import com.example.data.db.mapper.toEntity
 import com.example.data.db.mapper.toEntityPreservingBookmark
 import com.example.domain.Movie
 import com.example.domain.MovieRepository
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.onStart
 
 internal class MovieRepositoryImpl(
     private val api: TmdbApi,
@@ -20,55 +19,25 @@ internal class MovieRepositoryImpl(
     private val apiKey: String
 ) : MovieRepository {
 
-    override fun trendingMovies(): Flow<List<Movie>> = channelFlow {
-        val dbJob = launch {
-            dao.moviesByCategory("TRENDING")
-                .map { it.toDomain() }
-                .collect { send(it) }
-        }
-        launch {
-            try {
-                val response = api.trending(apiKey)
-                if (response.isSuccessful) {
-                    val entities = response.body()?.results
-                        ?.map { it.toEntityPreservingBookmark(dao, "TRENDING") }
-                        ?: emptyList()
-
-                    dao.insertMovies(entities)
-                }
-            } catch (e: Exception) {
-                Log.e("Repository", "Trending fetch failed", e)
+    override fun trendingMovies(): Flow<List<Movie>> =
+        dao.moviesByCategory("TRENDING")
+            .onStart {
+                fetchTrendingFromApi()
             }
-        }
-
-        awaitClose { dbJob.cancel() }
-    }
-
-    override fun nowPlayingMovies(): Flow<List<Movie>> = channelFlow {
-
-        val dbJob = launch {
-            dao.moviesByCategory("NOW_PLAYING")
-                .map { it.toDomain() }
-                .collect { send(it) }
-        }
-
-        launch {
-            try {
-                val response = api.nowPlaying(apiKey)
-                if (response.isSuccessful) {
-                    val entities = response.body()?.results
-                        ?.map { it.toEntity("NOW_PLAYING") }
-                        ?: emptyList()
-
-                    dao.insertMovies(entities)
-                }
-            } catch (e: Exception) {
-                Log.e("Repository", "Now playing fetch failed", e)
+            .filter { entities ->
+                entities.isNotEmpty()
             }
-        }
+            .map { it.toDomain() }
 
-        awaitClose { dbJob.cancel() }
-    }
+    override fun nowPlayingMovies(): Flow<List<Movie>> =
+        dao.moviesByCategory("NOW_PLAYING")
+            .onStart {
+                fetchNowPlayingFromApi()
+            }
+            .filter { entities ->
+                entities.isNotEmpty()
+            }
+            .map { it.toDomain() }
 
     override fun bookmarkedMovies(): Flow<List<Movie>> =
         dao.bookmarkedMovies()
@@ -82,6 +51,7 @@ internal class MovieRepositoryImpl(
                 ?.map { it.toDomain() }
                 ?: emptyList()
         } catch (e: Exception) {
+            Log.e("Repository", "Search failed", e)
             emptyList()
         }
 
@@ -107,6 +77,43 @@ internal class MovieRepositoryImpl(
     override suspend fun bookmarkMovie(movieId: Int, bookmarked: Boolean) {
         dao.updateBookmark(movieId, bookmarked)
     }
+
+    private suspend fun fetchTrendingFromApi() {
+        try {
+            val response = api.trending(apiKey)
+            if (response.isSuccessful) {
+                val entities = response.body()?.results
+                    ?.map {
+                        it.toEntityPreservingBookmark(
+                            dao = dao,
+                            category = "TRENDING"
+                        )
+                    }
+                    ?: emptyList()
+
+                dao.insertMovies(entities)
+            }
+        } catch (e: Exception) {
+            Log.e("Repository", "Trending fetch failed", e)
+        }
+    }
+
+    private suspend fun fetchNowPlayingFromApi() {
+        try {
+            val response = api.nowPlaying(apiKey)
+            if (response.isSuccessful) {
+                val entities = response.body()?.results
+                    ?.map { it.toEntity("NOW_PLAYING") }
+                    ?: emptyList()
+
+                dao.insertMovies(entities)
+            }
+        } catch (e: Exception) {
+            Log.e("Repository", "Now playing fetch failed", e)
+        }
+    }
 }
+
+
 
 
