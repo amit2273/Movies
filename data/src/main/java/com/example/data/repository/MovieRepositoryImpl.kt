@@ -8,11 +8,11 @@ import com.example.data.db.mapper.toEntity
 import com.example.data.db.mapper.toEntityPreservingBookmark
 import com.example.domain.Movie
 import com.example.domain.MovieRepository
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emitAll
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.launch
 
 internal class MovieRepositoryImpl(
     private val api: TmdbApi,
@@ -20,13 +20,13 @@ internal class MovieRepositoryImpl(
     private val apiKey: String
 ) : MovieRepository {
 
-    override fun trendingMovies(): Flow<List<Movie>> =
-        flow {
-            emitAll(
-                dao.moviesByCategory("TRENDING")
-                    .map { it.toDomain() }
-            )
-        }.onStart {
+    override fun trendingMovies(): Flow<List<Movie>> = channelFlow {
+        val dbJob = launch {
+            dao.moviesByCategory("TRENDING")
+                .map { it.toDomain() }
+                .collect { send(it) }
+        }
+        launch {
             try {
                 val response = api.trending(apiKey)
                 if (response.isSuccessful) {
@@ -41,24 +41,34 @@ internal class MovieRepositoryImpl(
             }
         }
 
-    override fun nowPlayingMovies(): Flow<List<Movie>> =
-        flow {
-            emitAll(
-                dao.moviesByCategory("NOW_PLAYING")
-                    .map { it.toDomain() }
-            )
-        }.onStart {
+        awaitClose { dbJob.cancel() }
+    }
+
+    override fun nowPlayingMovies(): Flow<List<Movie>> = channelFlow {
+
+        val dbJob = launch {
+            dao.moviesByCategory("NOW_PLAYING")
+                .map { it.toDomain() }
+                .collect { send(it) }
+        }
+
+        launch {
             try {
                 val response = api.nowPlaying(apiKey)
                 if (response.isSuccessful) {
-                    response.body()?.results?.let {
-                        dao.insertMovies(it.toEntity("NOW_PLAYING"))
-                    }
+                    val entities = response.body()?.results
+                        ?.map { it.toEntity("NOW_PLAYING") }
+                        ?: emptyList()
+
+                    dao.insertMovies(entities)
                 }
             } catch (e: Exception) {
-                Log.e("Repository", "Now playing fetch failed (offline?)", e)
+                Log.e("Repository", "Now playing fetch failed", e)
             }
         }
+
+        awaitClose { dbJob.cancel() }
+    }
 
     override fun bookmarkedMovies(): Flow<List<Movie>> =
         dao.bookmarkedMovies()
@@ -76,18 +86,16 @@ internal class MovieRepositoryImpl(
         }
 
     override suspend fun movieDetails(movieId: Int): Movie {
-        val cached = dao.movieById(movieId)
-        if (cached != null) {
-            return cached.toDomain()
+        dao.movieById(movieId)?.let {
+            return it.toDomain()
         }
+
         try {
             val response = api.details(movieId, apiKey)
             if (response.isSuccessful) {
-                response.body()?.let {
-                    val entity = it.toEntity(category = "DETAILS")
-                    dao.insertMovies(listOf(entity))
-                    return entity.toDomain()
-                }
+                val entity = response.body()!!.toEntity(category = "DETAILS")
+                dao.insertMovies(listOf(entity))
+                return entity.toDomain()
             }
         } catch (e: Exception) {
             Log.e("Repository", "Details fetch failed", e)
@@ -100,4 +108,5 @@ internal class MovieRepositoryImpl(
         dao.updateBookmark(movieId, bookmarked)
     }
 }
+
 
